@@ -17,22 +17,30 @@ for p in [ROOT_DIR, CURRENT_DIR, ROOT_DIR / "src", ROOT_DIR / "web"]:
 
 class VercelPathNormalizer:
     """
-    WSGI Middleware to normalize PATH_INFO when Vercel rewrites route through /api/index
-    or /api/index.py, ensuring Flask routes match correctly.
+    WSGI Middleware to normalize PATH_INFO when Vercel rewrites route through /api/index,
+    inspecting HTTP_X_MATCHED_PATH / headers to preserve requested subroutes.
     """
     def __init__(self, wsgi_app):
         self.wsgi_app = wsgi_app
 
     def __call__(self, environ, start_response):
-        path = environ.get('PATH_INFO', '')
-        # Strip internal serverless route prefixes
-        for prefix in ['/api/index.py', '/api/index']:
-            if path == prefix:
-                environ['PATH_INFO'] = '/'
-                break
-            elif path.startswith(prefix + '/'):
-                environ['PATH_INFO'] = path[len(prefix):]
-                break
+        matched = (
+            environ.get('HTTP_X_MATCHED_PATH') or
+            environ.get('HTTP_X_VERCEL_PATH') or
+            environ.get('HTTP_X_FORWARDED_URI') or
+            environ.get('REQUEST_URI')
+        )
+        if matched and not matched.startswith('/api/index'):
+            environ['PATH_INFO'] = matched.split('?')[0]
+        else:
+            path = environ.get('PATH_INFO', '')
+            for prefix in ['/api/index.py', '/api/index']:
+                if path == prefix:
+                    environ['PATH_INFO'] = '/'
+                    break
+                elif path.startswith(prefix + '/'):
+                    environ['PATH_INFO'] = path[len(prefix):]
+                    break
         return self.wsgi_app(environ, start_response)
 
 app = None

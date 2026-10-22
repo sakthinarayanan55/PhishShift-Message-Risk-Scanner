@@ -24,12 +24,27 @@ class VercelPathNormalizer:
         self.wsgi_app = wsgi_app
 
     def __call__(self, environ, start_response):
+        if 'debug-env' in environ.get('PATH_INFO', '') or 'debug-env' in environ.get('REQUEST_URI', '') or 'debug-env' in environ.get('HTTP_X_MATCHED_PATH', ''):
+            import json
+            status = '200 OK'
+            headers = [('Content-Type', 'application/json')]
+            start_response(status, headers)
+            data = {
+                'PATH_INFO': environ.get('PATH_INFO'),
+                'REQUEST_URI': environ.get('REQUEST_URI'),
+                'RAW_URI': environ.get('RAW_URI'),
+                'HTTP_X_MATCHED_PATH': environ.get('HTTP_X_MATCHED_PATH'),
+                'headers': {k: str(v) for k, v in environ.items() if k.startswith('HTTP_')}
+            }
+            return [json.dumps(data, indent=2).encode('utf-8')]
+
         matched = (
             environ.get('HTTP_X_MATCHED_PATH') or
             environ.get('HTTP_X_VERCEL_PATH') or
             environ.get('HTTP_X_FORWARDED_URI') or
             environ.get('REQUEST_URI')
         )
+
         if matched and not matched.startswith('/api/index'):
             environ['PATH_INFO'] = matched.split('?')[0]
         else:

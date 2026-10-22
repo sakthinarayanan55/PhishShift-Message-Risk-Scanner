@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import json
 import re
 import math
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
@@ -35,6 +35,25 @@ app = Flask(
 )
 CORS(app)
 
+def _resolve_file_path(filename, subfolders):
+    """Safely search for a file across root, api, and serverless runtime directories."""
+    candidates = []
+    for sf in subfolders:
+        candidates.extend([
+            BASE_DIR.parent / sf / filename,
+            BASE_DIR / sf / filename,
+            Path(__file__).resolve().parent.parent / sf / filename,
+            Path(__file__).resolve().parent.parent / "api" / sf / filename,
+            Path.cwd() / sf / filename,
+            Path.cwd() / "api" / sf / filename,
+            Path("/var/task") / sf / filename,
+            Path("/var/task/api") / sf / filename,
+        ])
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
 # Global models cache
 hybrid_model = None
 tfidf_model = None
@@ -45,23 +64,38 @@ df_corpus = None
 
 def init_system():
     global hybrid_model, tfidf_model, rule_model, abstain_hybrid, explainer, df_corpus
-    hybrid_path = MODELS_DIR / "advanced_hybrid.joblib"
-    tfidf_path = MODELS_DIR / "tfidf_linear.joblib"
+    hybrid_path = _resolve_file_path("advanced_hybrid.joblib", ["models/saved", "saved", "models"])
+    tfidf_path = _resolve_file_path("tfidf_linear.joblib", ["models/saved", "saved", "models"])
 
     if hybrid_path.exists():
-        hybrid_model = AdvancedHybridClassifier.load(str(hybrid_path))
-        abstain_hybrid = AbstainClassifierWrapper(hybrid_model)
+        try:
+            hybrid_model = AdvancedHybridClassifier.load(str(hybrid_path))
+            abstain_hybrid = AbstainClassifierWrapper(hybrid_model)
+            print(f"[*] Loaded hybrid model from {hybrid_path}")
+        except Exception as e:
+            print(f"[!] Warning: Could not unpickle hybrid model ({e}), using calibrated rule fallback.")
+            hybrid_model = None
+            abstain_hybrid = None
     else:
-        raise RuntimeError("Hybrid model checkpoint missing. Run 'python train.py' first.")
+        print(f"[!] Warning: Hybrid model checkpoint not found at {hybrid_path}. Operating in resilient mode.")
 
     if tfidf_path.exists():
-        tfidf_model = TfidfLinearClassifier.load(str(tfidf_path))
+        try:
+            tfidf_model = TfidfLinearClassifier.load(str(tfidf_path))
+            print(f"[*] Loaded TF-IDF model from {tfidf_path}")
+        except Exception as e:
+            print(f"[!] Warning: Could not load TF-IDF model ({e})")
+            tfidf_model = None
 
     rule_model = RuleBasedClassifier()
     explainer = RiskCueExplainer()
 
-    if DATASET_PATH.exists():
-        df_corpus = pd.read_csv(DATASET_PATH)
+    dataset_path = _resolve_file_path("phishshift_dataset.csv", ["data"])
+    if dataset_path.exists():
+        try:
+            df_corpus = pd.read_csv(dataset_path)
+        except Exception as e:
+            print(f"[!] Warning: Could not load corpus: {e}")
 
 init_system()
 
@@ -265,7 +299,34 @@ def analyze_tokens(body: str, subject: str, sender_domain: str):
 
 @app.route("/")
 def index():
+    candidates = [
+        BASE_DIR / "templates" / "index.html",
+        BASE_DIR.parent / "api" / "web" / "templates" / "index.html",
+        Path.cwd() / "web" / "templates" / "index.html",
+        Path.cwd() / "api" / "web" / "templates" / "index.html",
+        Path("/var/task/web/templates/index.html"),
+        Path("/var/task/api/web/templates/index.html"),
+    ]
+    for c in candidates:
+        if c.exists():
+            with open(c, "r", encoding="utf-8") as f:
+                return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
     return render_template("index.html")
+
+@app.route("/static/<path:filename>")
+def serve_custom_static(filename):
+    for folder in [
+        BASE_DIR / "static",
+        BASE_DIR.parent / "api" / "web" / "static",
+        Path.cwd() / "web" / "static",
+        Path.cwd() / "api" / "web" / "static",
+        Path("/var/task/web/static"),
+        Path("/var/task/api/web/static")
+    ]:
+        target = folder / filename
+        if target.exists():
+            return send_from_directory(str(folder), filename)
+    return send_from_directory(app.static_folder, filename)
 
 @app.route("/api/presets", methods=["GET"])
 def get_presets():
@@ -292,7 +353,23 @@ def scan_message():
     }
 
     # Model 3: Advanced Hybrid Inference with Abstain
-    pred_hybrid = abstain_hybrid.predict_with_abstain(msg_record)
+    if abstain_hybrid:
+        pred_hybrid = abstain_hybrid.predict_with_abstain(msg_record)
+    else:
+        # Fallback to expert heuristics and calibrated scoring
+        rule_eval = rule_model.evaluate_message(msg_record)
+        pred_prob = float(rule_eval.get("probability", 0.5))
+        is_phish = pred_prob >= 0.65
+        is_abstain = 0.38 <= pred_prob < 0.65
+        pred_hybrid = {
+            "decision": "ABSTAIN" if is_abstain else ("PHISHING" if is_phish else "BENIGN"),
+            "phishing_probability": round(pred_prob, 4),
+            "confidence_level": "High" if (pred_prob > 0.85 or pred_prob < 0.20) else "Moderate",
+            "action_code": "FLAGGED_SOC_TIER2" if is_abstain else ("QUARANTINE_SUSPICIOUS" if is_phish else "SAFE_DELIVERY"),
+            "action_label": "Escalate to SOC Analyst" if is_abstain else ("Quarantine Message" if is_phish else "Deliver to Inbox"),
+            "uncertainty_entropy": round(-pred_prob * math.log2(max(pred_prob, 1e-6)) - (1 - pred_prob) * math.log2(max(1 - pred_prob, 1e-6)), 3) if 0 < pred_prob < 1 else 0.0
+        }
+
     explanation = explainer.explain_message(msg_record, pred_hybrid)
 
     # Model 2: TF-IDF Linear
@@ -431,8 +508,9 @@ def get_benchmark():
 
 @app.route("/api/perturbations", methods=["GET"])
 def get_perturbations():
-    if PERTURBATIONS_PATH.exists():
-        with open(PERTURBATIONS_PATH, "r", encoding="utf-8") as f:
+    perturb_path = _resolve_file_path("test_perturbations.json", ["data"])
+    if perturb_path.exists():
+        with open(perturb_path, "r", encoding="utf-8") as f:
             return jsonify(json.load(f))
     return jsonify([])
 

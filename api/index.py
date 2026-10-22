@@ -1,7 +1,7 @@
 """
 Vercel Serverless Function Entrypoint for PhishShift Message Risk Scanner.
 Exposes WSGI callable `app` and `handler` for Vercel Python Runtime.
-Includes resilient diagnostic reporting so import/runtime issues are visibly surfaced.
+Includes VercelPathNormalizer middleware to handle Vercel rewrites seamlessly.
 """
 import sys
 import traceback
@@ -15,13 +15,33 @@ for p in [ROOT_DIR, CURRENT_DIR, ROOT_DIR / "src", ROOT_DIR / "web"]:
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+class VercelPathNormalizer:
+    """
+    WSGI Middleware to normalize PATH_INFO when Vercel rewrites route through /api/index
+    or /api/index.py, ensuring Flask routes match correctly.
+    """
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        path = environ.get('PATH_INFO', '')
+        # Strip internal serverless route prefixes
+        for prefix in ['/api/index.py', '/api/index']:
+            if path == prefix:
+                environ['PATH_INFO'] = '/'
+                break
+            elif path.startswith(prefix + '/'):
+                environ['PATH_INFO'] = path[len(prefix):]
+                break
+        return self.wsgi_app(environ, start_response)
+
 app = None
 handler = None
 
 try:
     from web.app import app as flask_app
-    app = flask_app
-    handler = flask_app
+    app = VercelPathNormalizer(flask_app)
+    handler = app
 except Exception as e:
     startup_error = traceback.format_exc()
     print("Vercel Startup Error Traceback:\n", startup_error)
@@ -61,5 +81,5 @@ except Exception as e:
     handler = diagnostic_app
 
 if __name__ == "__main__":
-    if hasattr(app, "run"):
-        app.run(host="127.0.0.1", port=5000, debug=True)
+    from web.app import app as dev_app
+    dev_app.run(host="127.0.0.1", port=5000, debug=True)

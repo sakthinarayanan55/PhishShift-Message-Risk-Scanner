@@ -312,6 +312,9 @@ def analyze_tokens(body: str, subject: str, sender_domain: str):
     return tokens_meta
 
 @app.route("/")
+@app.route("/api")
+@app.route("/api/index")
+@app.route("/api/index.py")
 def index():
     candidates = [
         BASE_DIR / "templates" / "index.html",
@@ -325,7 +328,22 @@ def index():
         if c.exists():
             with open(c, "r", encoding="utf-8") as f:
                 return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
-    return render_template("index.html")
+    try:
+        return render_template("index.html")
+    except Exception as e:
+        return f"<h1>PhishShift Template Error</h1><p>{e}</p>", 500
+
+@app.errorhandler(404)
+def handle_404(e):
+    clean = request.path.strip("/")
+    if clean in ("", "api", "api/index", "api/index.py"):
+        return index()
+    return jsonify({
+        "error": "Not Found",
+        "path": request.path,
+        "method": request.method
+    }), 404
+
 
 @app.route("/static/<path:filename>")
 def serve_custom_static(filename):

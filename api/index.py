@@ -1,10 +1,11 @@
 """
 Vercel Serverless Function Entrypoint for PhishShift Message Risk Scanner.
 Exposes WSGI callable `app` and `handler` for Vercel Python Runtime.
-Includes VercelPathNormalizer middleware to handle Vercel rewrites seamlessly.
+Includes VercelPathNormalizer middleware to handle Vercel rewrites and query-string path forwarding.
 """
 import sys
 import traceback
+from urllib.parse import parse_qs, urlencode
 from pathlib import Path
 
 # Setup paths to ensure root, api, src, and web are importable
@@ -18,44 +19,39 @@ for p in [ROOT_DIR, CURRENT_DIR, ROOT_DIR / "src", ROOT_DIR / "web"]:
 class VercelPathNormalizer:
     """
     WSGI Middleware to normalize PATH_INFO when Vercel rewrites route through /api/index,
-    inspecting HTTP_X_MATCHED_PATH / headers to preserve requested subroutes.
+    recovering the original route from query parameter 'path' or standard headers.
     """
     def __init__(self, wsgi_app):
         self.wsgi_app = wsgi_app
 
     def __call__(self, environ, start_response):
-        if 'debug-env' in environ.get('PATH_INFO', '') or 'debug-env' in environ.get('REQUEST_URI', '') or 'debug-env' in environ.get('HTTP_X_MATCHED_PATH', ''):
-            import json
-            status = '200 OK'
-            headers = [('Content-Type', 'application/json')]
-            start_response(status, headers)
-            data = {
-                'PATH_INFO': environ.get('PATH_INFO'),
-                'REQUEST_URI': environ.get('REQUEST_URI'),
-                'RAW_URI': environ.get('RAW_URI'),
-                'HTTP_X_MATCHED_PATH': environ.get('HTTP_X_MATCHED_PATH'),
-                'headers': {k: str(v) for k, v in environ.items() if k.startswith('HTTP_')}
-            }
-            return [json.dumps(data, indent=2).encode('utf-8')]
-
-        matched = (
-            environ.get('HTTP_X_MATCHED_PATH') or
-            environ.get('HTTP_X_VERCEL_PATH') or
-            environ.get('HTTP_X_FORWARDED_URI') or
-            environ.get('REQUEST_URI')
-        )
-
-        if matched and not matched.startswith('/api/index'):
-            environ['PATH_INFO'] = matched.split('?')[0]
+        qs = parse_qs(environ.get('QUERY_STRING', ''), keep_blank_values=True)
+        if 'path' in qs:
+            captured_path = qs.pop('path')[0]
+            if captured_path:
+                environ['PATH_INFO'] = '/' + captured_path.lstrip('/')
+            else:
+                environ['PATH_INFO'] = '/'
+            # Reconstruct clean QUERY_STRING without our internal 'path' param
+            environ['QUERY_STRING'] = urlencode([(k, v) for k, vs in qs.items() for v in vs])
         else:
-            path = environ.get('PATH_INFO', '')
-            for prefix in ['/api/index.py', '/api/index']:
-                if path == prefix:
-                    environ['PATH_INFO'] = '/'
-                    break
-                elif path.startswith(prefix + '/'):
-                    environ['PATH_INFO'] = path[len(prefix):]
-                    break
+            matched = (
+                environ.get('HTTP_X_MATCHED_PATH') or
+                environ.get('HTTP_X_VERCEL_PATH') or
+                environ.get('HTTP_X_FORWARDED_URI') or
+                environ.get('REQUEST_URI')
+            )
+            if matched and not matched.startswith('/api/index'):
+                environ['PATH_INFO'] = matched.split('?')[0]
+            else:
+                path = environ.get('PATH_INFO', '')
+                for prefix in ['/api/index.py', '/api/index']:
+                    if path == prefix:
+                        environ['PATH_INFO'] = '/'
+                        break
+                    elif path.startswith(prefix + '/'):
+                        environ['PATH_INFO'] = path[len(prefix):]
+                        break
         return self.wsgi_app(environ, start_response)
 
 app = None

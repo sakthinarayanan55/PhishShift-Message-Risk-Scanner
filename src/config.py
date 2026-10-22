@@ -66,6 +66,10 @@ CREDENTIAL_HARVEST_KEYWORDS = [
 # Random seed for reproducibility
 RANDOM_STATE = 42
 
-# Ensure directories exist
+# Ensure directories exist if filesystem is writable (serverless environments like Vercel have read-only filesystems)
 for d in [DATA_DIR, MODELS_DIR, REPORTS_DIR, FIGURES_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+

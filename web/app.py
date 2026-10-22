@@ -97,7 +97,21 @@ def init_system():
         except Exception as e:
             print(f"[!] Warning: Could not load corpus: {e}")
 
-init_system()
+try:
+    init_system()
+except Exception as _e:
+    print(f"[!] Warning: Startup init error: {_e}")
+    if rule_model is None:
+        try:
+            rule_model = RuleBasedClassifier()
+        except Exception:
+            pass
+    if explainer is None:
+        try:
+            explainer = RiskCueExplainer()
+        except Exception:
+            pass
+
 
 # Comprehensive Preset Scenarios
 PRESET_CASES = [
